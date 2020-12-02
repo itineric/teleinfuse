@@ -1,19 +1,23 @@
-/*-
- * teleinfuse is a FUSE module to access to the "Téléinformation"
- * "Téléinfo" data are transmitted by french electric meters (EDF/ERDF)
+/*
+ * teleinfuse is a FUSE module to access to the Télé information of linky electric meter running in standard mode
+ * Télé info data are transmitted by french electric meters (EDF/ERDF)
+ * [FR] Permet de lire la téléinformation cliente (TIC) d'un compteur linky en mode standard.
+ * [FR] Pour le mode TIC historique, voir le projet original
  *
- * Copyright (C) 2010 Romuald Conty
+ * Based on https://github.com/neomilium/teleinfuse project by Romuald Conty
+ *
+ * Copyright (C) 2020 itineric
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
@@ -41,11 +45,11 @@ int teleinfo_open (const char* port)
       syslog(LOG_ERR, "Erreur ouverture du port serie %s !", port);
       return 0;
     }
-    
+
     tcgetattr(fd,&teleinfo_serial_attr) ;                            // Lecture des parametres courants.
 
-    cfsetispeed(&teleinfo_serial_attr, B1200) ;                       // Configure le débit en entrée/sortie.
-    cfsetospeed(&teleinfo_serial_attr, B1200) ;
+    cfsetispeed(&teleinfo_serial_attr, B9600) ;                       // Configure le débit en entrée/sortie.
+    cfsetospeed(&teleinfo_serial_attr, B9600) ;
 
     teleinfo_serial_attr.c_cflag |= (CLOCAL | CREAD) ;                   // Active réception et mode local.
 
@@ -72,7 +76,7 @@ int teleinfo_open (const char* port)
     return fd ;
 }
 
-void teleinfo_close (int fd) 
+void teleinfo_close (int fd)
 {
   close (fd);
 }
@@ -94,11 +98,11 @@ void dbg_dump(const char* buf, size_t n)
 
 // Trame Teleinfo
 // STX 1 char (0x02)
-// [ MESSAGE_0 ] 25 char max
+// [ MESSAGE_0 ]
 // ... [ MESSAGE_N ]
 // ETX 1 char (0x03)
 #define STX '\x02'
-#define ETX '\x03' 
+#define ETX '\x03'
 #define EOT '\x04'
 #define LF  '\x0a'
 #define CR  '\x0d'
@@ -217,7 +221,9 @@ int teleinfo_read_frame_ext (const int fd, char *const buffer, const size_t bufl
             break;
         }
     }
-    if (current_state == INIT) bytes_in_init_mode++;
+    if (current_state == INIT) {
+      bytes_in_init_mode++;
+    }
   } while ((current_state != FRAME_END) && (error_count<10) && (bytes_in_init_mode<TI_FRAME_LENGTH_MAX*2));
   if (error_counter != NULL) {
     *error_counter = error_count;
@@ -230,18 +236,16 @@ int teleinfo_read_frame_ext (const int fd, char *const buffer, const size_t bufl
   }
 }
 
-int teleinfo_checksum (char *message)
+int teleinfo_checksum (char *message, char *message_oel)
 {
-  const char * message_oel = strchr(message, 0x0d);             // Mémorise le pointer de fin de ligne
   unsigned char sum = 0 ;                 // Somme des codes ASCII du message
 
   message++;
-  while ( (*message != '\0') && (message != (message_oel-2) ) ) { // Tant qu'on est pas au checksum (avec SP precédent)
+  while ( (*message != '\0') && (message != (message_oel-1) ) ) { // Tant qu'on est pas au checksum
     sum += *message;
     message++;
   }
   sum = (sum & 0x3F) + 0x20 ;
-  message++; // On passe le SP
   if ( sum == *message) {
     return 1 ;        // Return 1 si checkum ok.*
   }
@@ -255,29 +259,48 @@ int teleinfo_decode (const char * frame, teleinfo_data dataset[], size_t * datas
 {
   char * message_oel;
   char * message = (char*)frame;
-  char label[20];
-  char value[20];
-  int wrong_checksum_count = 0;
+  int error_in_message = 0;
   size_t data_count = 0;
   *datasetlen = 0;
 
   while ( (message_oel = strchr(message, 0x0d)) ) {
-    if (1 == teleinfo_checksum(message)) {
+    if (1 == teleinfo_checksum(message, message_oel)) {
       message++; // On passe le LF de début de ligne
 
-      sscanf( message, "%s %s *", label, value );
-      // TODO: Check if lenght(label) > 8
-      strncpy(dataset[data_count].label, label, 8); dataset[data_count].label[8] = '\0';
-      // TODO: Check  if lenght(value) > 12
-      strncpy(dataset[data_count].value, value, 12); dataset[data_count].value[12] = '\0';
-      data_count++;
+      char *tab_index = strchr(message, '\t');
+      int length = tab_index - message;
 
-    } else {
+      strncpy(dataset[data_count].label, message, length);
+      dataset[data_count].label[length] = '\0';
+      char * previous_tab_index = message = tab_index + 1;
+
+      tab_index = strchr(message, '\t');
+      length = tab_index - message;
+      message = tab_index + 1;
+
+      tab_index = strchr(message, '\t');
+      if (tab_index && tab_index < message_oel) {
+
+        strncpy(dataset[data_count].datetime, previous_tab_index, length);
+        dataset[data_count].datetime[length] = '\0';
+
+        length = tab_index - message;
+        strncpy(dataset[data_count].value, message, length);
+        dataset[data_count].value[length] = '\0';
+      }
+      else {
+
+        strncpy(dataset[data_count].value, previous_tab_index, length);
+        dataset[data_count].value[length] = '\0';
+      }
+      data_count++;
+    }
+    else {
       // Erreur de checksum
-      wrong_checksum_count++;
-      if (wrong_checksum_count>=3) {
+      error_in_message++;
+      if (error_in_message>=3) {
         return EBADMSG;
-       }
+      }
     }
     message = message_oel; // On se place sur la fin de ligne
     message++; // On passe le CR de fin de ligne

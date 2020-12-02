@@ -1,27 +1,26 @@
-/*-
-* teleinfuse is a FUSE module to access to the "Téléinformation"
-* "Téléinfo" data are transmitted by french electric meters (EDF/ERDF)
-*
-* Copyright (C) 2010 Romuald Conty
-*
-* This program is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* This program is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 /*
- This file is based on hellofuse with following copyright
-   Copyright (C) 2001-2005  Miklos Szeredi <miklos@szeredi.hu>
-*/
+ * teleinfuse is a FUSE module to access to the Télé information of linky electric meter running in standard mode
+ * Télé info data are transmitted by french electric meters (EDF/ERDF)
+ * [FR] Permet de lire la téléinformation cliente (TIC) d'un compteur linky en mode standard.
+ * [FR] Pour le mode TIC historique, voir le projet original
+ *
+ * Based on https://github.com/neomilium/teleinfuse project by Romuald Conty
+ *
+ * Copyright (C) 2020 itineric
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -42,20 +41,19 @@
 #include <unistd.h>
 #include <time.h>
 
-// Define port serie
 #include "teleinfo.h"
 
 #include <time.h>
 
 typedef struct {
-  char filename[20];
-  char content[30];
+  char filename[18];
+  char content[99];
   time_t time;
-  // time_t td;
 } teleinfuse_file;
 
 typedef struct {
   uint interval;
+  int with_datetime;
   const char* port;
 } teleinfuse_args;
 
@@ -63,7 +61,7 @@ static pthread_mutex_t teleinfuse_files_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_t teleinfuse_thread;
 teleinfuse_args teleinfuse_thread_args;
 
-static teleinfuse_file teleinfuse_files[32];
+static teleinfuse_file teleinfuse_files[TI_MESSAGE_COUNT_MAX + 1]; // (+ 1 -> fake status file)
 static size_t teleinfuse_files_count = 0;
 
 teleinfuse_file* teleinfuse_find_file(const char* label)
@@ -78,27 +76,38 @@ teleinfuse_file* teleinfuse_find_file(const char* label)
   return file;
 }
 
-void teleinfuse_update (const teleinfo_data dataset[], size_t datasetlen)
+void teleinfuse_update_file (const char* name, const char* content)
 {
   time_t now = time(NULL);
   teleinfuse_file * file;
-  
+
+  if ( (file=teleinfuse_find_file (name)) ) {
+    if (0!=strcmp(content, file->content)) {
+      strcpy (file->content, content);
+      file->time = now;
+    } // else do nothing
+  } else {
+    // New file
+    file = &(teleinfuse_files[teleinfuse_files_count]);
+    strcpy(file->filename, name);
+    strcpy(file->content,  content);
+    teleinfuse_files[teleinfuse_files_count].time = now;
+    teleinfuse_files_count++;
+  }
+}
+
+void teleinfuse_update (const teleinfo_data dataset[], size_t datasetlen)
+{
+  char datetime_name[20];
+
   pthread_mutex_lock( &teleinfuse_files_mutex );
   for (int n=0; n<datasetlen; n++) {
-    if ( (file=teleinfuse_find_file (dataset[n].label)) ) {
-      if (0!=strcmp(dataset[n].value, file->content)) {
-        strcpy (file->content, dataset[n].value);
-        file->time = now;
-//         printf ("update: file->filename = %s, file->content = %s;\n", file->filename, file->content);
-      } // else do nothing
-    } else {
-      // New file
-      file = &(teleinfuse_files[teleinfuse_files_count]);
-      strcpy(file->filename, dataset[n].label);
-      strcpy(file->content,  dataset[n].value);
-      teleinfuse_files[teleinfuse_files_count].time = now;
-//       printf ("new: file->filename = %s, file->content = %s;\n", file->filename, file->content);
-      teleinfuse_files_count++;
+    teleinfuse_update_file(dataset[n].label, dataset[n].value);
+
+    if (teleinfuse_thread_args.with_datetime && strlen(dataset[n].datetime) > 0) {
+      strcpy(datetime_name, dataset[n].label);
+      strcat(datetime_name, DATETIME_FILENAME_SUFFIX);
+      teleinfuse_update_file(datetime_name, dataset[n].datetime);
     }
   }
   pthread_mutex_unlock( &teleinfuse_files_mutex );
@@ -177,7 +186,7 @@ static void *teleinfuse_init(struct fuse_conn_info *conn)
 static int teleinfuse_getattr(const char *path, struct stat *stbuf)
 {
   int res = -ENOENT;
-  
+
   memset(stbuf, 0, sizeof(struct stat));
   if(strcmp(path, "/") == 0) {
     stbuf->st_mode = S_IFDIR | 0755;
@@ -211,13 +220,13 @@ static int teleinfuse_readdir(const char *path, void *buf, fuse_fill_dir_t fille
 
   filler(buf, ".", NULL, 0);
   filler(buf, "..", NULL, 0);
-  
+
   pthread_mutex_lock( &teleinfuse_files_mutex );
   for (size_t n=0; n<teleinfuse_files_count; n++) {
     filler(buf, teleinfuse_files[n].filename, NULL, 0);
   }
   pthread_mutex_unlock( &teleinfuse_files_mutex );
-  
+
   return 0;
 }
 
@@ -237,7 +246,7 @@ static int teleinfuse_open(const char *path, struct fuse_file_info *fi)
 
   if((fi->flags & 3) != O_RDONLY)
     res = -EACCES;
-  
+
   return res;
 }
 
@@ -248,7 +257,7 @@ static int teleinfuse_read(const char *path, char *buf, size_t size, off_t offse
   (void) fi;
   int res = -ENOENT;
   size_t n;
-  
+
   pthread_mutex_lock( &teleinfuse_files_mutex );
   for (n=0; n<teleinfuse_files_count; n++) {
     if(strcmp(path+1, teleinfuse_files[n].filename) == 0) {
@@ -268,9 +277,9 @@ static int teleinfuse_read(const char *path, char *buf, size_t size, off_t offse
     memcpy(buf, teleinfuse_files[n].content + offset, size);
   } else
     size = 0;
-  
+
   pthread_mutex_unlock( &teleinfuse_files_mutex );
-  
+
   return size;
 }
 
@@ -291,6 +300,7 @@ static struct fuse_operations teleinfuse_oper = {
 /** options for fuse_opt.h */
 struct options {
    int interval;
+   int with_datetime;
 }options;
 
 /** macro to define options */
@@ -305,7 +315,8 @@ enum
 
 static struct fuse_opt teleinfuse_opts[] =
 {
-  TELEINFUSE_OPT_KEY("-i %d", interval, 10),
+  TELEINFUSE_OPT_KEY("interval=%d", interval, 10),
+  TELEINFUSE_OPT_KEY("with_datetime", with_datetime, 1),
   FUSE_OPT_END
 };
 
