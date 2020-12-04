@@ -1,6 +1,6 @@
 CC=gcc
 FUSE_CFLAGS=-D_FILE_OFFSET_BITS=64
-CFLAGS=-Wall -pedantic -std=gnu99 -DDEBUG $(FUSE_CFLAGS)
+CFLAGS=-Wall -pedantic -std=gnu99 $(FUSE_CFLAGS)
 EXEC=teleinfuse
 LDFLAGS=-pthread -lfuse
 

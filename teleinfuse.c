@@ -341,9 +341,10 @@ int main(int argc, char *argv[])
     return -1;
 
   openlog("teleinfuse", LOG_PID, LOG_USER) ;
-  syslog(LOG_INFO, "starting teleinfuse with %ds intervals", options.interval);
+  syslog(LOG_INFO, "starting teleinfuse with %ds intervals (with_datetime: %d)", options.interval, options.with_datetime);
   teleinfuse_thread_args.port = argv[1];
   teleinfuse_thread_args.interval = options.interval;
+  teleinfuse_thread_args.with_datetime = options.with_datetime;
 
   int fd;
   if ( (fd = teleinfo_open(teleinfuse_thread_args.port)) ) { // Be sure the port is reacheable
